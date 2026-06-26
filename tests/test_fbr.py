@@ -59,7 +59,9 @@ def test_mp_recovers_background_everywhere():
     stack, D = _synthetic_stack()
     fbr, mask = computeFbr(stack, mode="mp", enl=1.0)
     # The current implementation collapses the surviving stack to a single
-    # scalar FBR value (np.nanmean over the whole masked stack).
+    # scalar FBR value (sqrt(nanmean(x**2)) over the whole masked stack — the
+    # multi-look intensity average rooted back to amplitude). For a constant
+    # background of amplitude 1.0 this is exactly 1.0.
     assert np.ndim(fbr) == 0
     np.testing.assert_allclose(fbr, 1.0, atol=1e-12)
 

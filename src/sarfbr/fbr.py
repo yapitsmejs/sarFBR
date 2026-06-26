@@ -24,9 +24,12 @@ the worst date:
    ephemeral target), set the matching entry of the validity mask to ``NaN``,
    and recompute the CV. Dates are removed one at a time until every surviving
    pixel's CV is at or below the speckle level.
-3. Combine the surviving dates into a single FBR value by averaging them (MP
-   mode). RP mode (random pick) is not implemented and currently falls back to
-   MP with a warning.
+3. Combine the surviving dates into a single FBR value. In MP mode this is the
+   multi-look average of the surviving stable dates: the intensity
+   (amplitude**2) is averaged over the survivors and square-rooted back to
+   amplitude, i.e. ``fbr = sqrt(nanmean(x**2))`` — incoherent averaging of
+   intensities, not amplitudes. RP mode (random pick) is not implemented and
+   currently falls back to MP with a warning.
 """
 
 from __future__ import annotations
@@ -125,7 +128,8 @@ def _computeFbr_cupy(stack, mode: str, enl: float):
         fbrIteration += 1
 
     if mode == "mp":
-        # MP: average the surviving stable dates into the FBR image.
+        # MP: multi-look the surviving stable dates — average the intensity
+        # (amplitude**2) over survivors and root back to amplitude.
         fbr = cp.sqrt(cp.nanmean(x**2))
 
     return fbr, validMask
@@ -151,8 +155,9 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0):
     Returns
     -------
     fbr : ndarray, shape (H, W)
-        The frozen background reference image (MP: the per-pixel mean over the
-        surviving stable dates).
+        The frozen background reference image (MP: the multi-look average over
+        the surviving stable dates — ``sqrt(mean(intensity))``, i.e. the
+        intensity-averaged value rooted back to amplitude).
     mask : ndarray, shape (D, H, W)
         Validity mask matching ``stack``. Entries are ``1`` where the date was
         judged temporally stable and contributed to the FBR image, and ``NaN``
@@ -201,7 +206,8 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0):
         fbrIteration += 1
 
     if mode == "mp":
-        # MP: average the surviving stable dates into the FBR image.
+        # MP: multi-look the surviving stable dates — average the intensity
+        # (amplitude**2) over survivors and root back to amplitude.
         fbr = np.sqrt(np.nanmean(x**2))
 
     return fbr, validMask
