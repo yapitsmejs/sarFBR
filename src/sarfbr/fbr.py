@@ -85,7 +85,7 @@ def theoreticalCv(enl: float) -> float:
 
     return theoreticalCv
 
-def _computeFbr_cupy(stack, mode: str, enl: float):
+def _computeFbr_cupy(stack, mode: str, enl: float, a: float):
     """cupy backend for computeFbr (`stack` is a cupy.ndarray; returns cupy).
 
     Same iterative CV-based stable-pixel selection as the NumPy path, but the
@@ -104,24 +104,30 @@ def _computeFbr_cupy(stack, mode: str, enl: float):
 
     D, H, W = x.shape
     cvSpeckle = float(theoreticalCv(enl))
+    # Per-pixel acceptance threshold Psi(k) = CV_speckle + a/sqrt(k), where k is
+    # the per-pixel count of surviving (non-rejected) dates. With a=0 this
+    # reduces to the plain CV_speckle threshold. Recomputed each iteration as
+    # dates are rejected (k shrinks -> margin grows).
+    fbrThreshold = cvSpeckle + a / cp.sqrt(cp.sum(~cp.isnan(x), axis=0))
     # Iteratively reject the worst date per pixel until every pixel's temporal CV
-    # is at or below the speckle level. `cvX` is the per-pixel CV over dates
+    # is at or below the threshold. `cvX` is the per-pixel CV over dates
     # (shape (H, W)); `validMask` carries NaN where a date has been rejected.
     validMask = cp.ones_like(x)
     cvX = cp.nanstd(x, axis=0) / cp.nanmean(x, axis=0)
     fbrIteration = 0
-    while bool(cp.any(cvX > cvSpeckle)) and fbrIteration < D - 2:
+    while bool(cp.any(cvX > fbrThreshold)) and fbrIteration < D - 2:
         # For pixels still above the threshold, reject the single date whose
         # value departs most from that pixel's temporal mean (the putative
         # ephemeral target): set its validity entry to NaN.
         xMeanDeviation = cp.abs(x - cp.nanmean(x, axis=0)[None, ...])
         xMaxMeanDeviation = cp.nanmax(xMeanDeviation, axis=0)
-        reject = (cvX > cvSpeckle)[None, ...] & (xMeanDeviation == xMaxMeanDeviation[None, ...])
+        reject = (cvX > fbrThreshold)[None, ...] & (xMeanDeviation == xMaxMeanDeviation[None, ...])
         # Cast to float32 explicitly: cupy's scalar promotion for `cp.nan` is
         # version-dependent, and the mask must stay float32 to match the NumPy path.
         validMask = cp.where(reject, cp.nan, validMask).astype(cp.float32, copy=False)
         x *= validMask
         cvX = cp.nanstd(x, axis=0) / cp.nanmean(x, axis=0)
+        fbrThreshold = cvSpeckle + a / cp.sqrt(cp.sum(~cp.isnan(x), axis=0))
         fbrIteration += 1
 
     if mode == "mp":
@@ -182,7 +188,7 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0, a: float = 0.0):
     # device actually being present; without one the cupy branch is never taken.)
     if _HAVE_CUPY_GPU and isinstance(stack, cp.ndarray):
         print("computeFbr: using cupy GPU acceleration")
-        return _computeFbr_cupy(stack, mode, enl)
+        return _computeFbr_cupy(stack, mode, enl, a)
 
     x = stack.astype(np.float32)
     if x.ndim != 3:
@@ -245,27 +251,32 @@ def _computeFbr_selfcheck():
     stack[7, 3, 3] = 20.0
     stack[4, 5, 5] = 20.0
 
-    # Reference: NumPy path.
-    fbr_ref, mask_ref = computeFbr(stack, mode="mp", enl=1.0)
-    # GPU: move up once, run on GPU, bring back once.
+    # Exercise both the plain threshold (a=0) and the paper's margin threshold
+    # (a=3): the cupy path must match the NumPy reference for each.
     g = cp.asarray(stack)
-    fbr_g, mask_g = computeFbr(g, mode="mp", enl=1.0)
-    fbr_g = cp.asnumpy(fbr_g)
-    mask_g = cp.asnumpy(mask_g)
+    ok_all = True
+    for a in (0.0, 3.0):
+        # Reference: NumPy path.
+        fbr_ref, mask_ref = computeFbr(stack, mode="mp", enl=1.0, a=a)
+        # GPU: move up once, run on GPU, bring back once.
+        fbr_g, mask_g = computeFbr(g, mode="mp", enl=1.0, a=a)
+        fbr_g = cp.asnumpy(fbr_g)
+        mask_g = cp.asnumpy(mask_g)
 
-    shape_ok = mask_g.shape == mask_ref.shape == (D, H, W)
-    dtype_ok = mask_g.dtype == mask_ref.dtype == np.float32
-    fbr_close = np.allclose(np.asarray(fbr_g), np.asarray(fbr_ref), rtol=1e-4, atol=1e-5)
-    mask_close = np.allclose(mask_g, mask_ref, rtol=0.0, atol=0.0, equal_nan=True)
-    max_fbr_diff = float(np.nanmax(np.abs(np.asarray(fbr_g) - np.asarray(fbr_ref))))
+        shape_ok = mask_g.shape == mask_ref.shape == (D, H, W)
+        dtype_ok = mask_g.dtype == mask_ref.dtype == np.float32
+        fbr_close = np.allclose(np.asarray(fbr_g), np.asarray(fbr_ref), rtol=1e-4, atol=1e-5)
+        mask_close = np.allclose(mask_g, mask_ref, rtol=0.0, atol=0.0, equal_nan=True)
+        max_fbr_diff = float(np.nanmax(np.abs(np.asarray(fbr_g) - np.asarray(fbr_ref))))
 
-    ok = bool(shape_ok and dtype_ok and fbr_close and mask_close)
-    print(f"computeFbr self-check: {'PASS' if ok else 'FAIL'} "
-          f"(shape={shape_ok}, dtype={dtype_ok}, fbr_close={fbr_close}, "
-          f"mask_close={mask_close}, max_fbr_diff={max_fbr_diff:.3e})")
-    if not ok:
-        print("ref fbr", np.asarray(fbr_ref), "got fbr", np.asarray(fbr_g))
-    return ok
+        ok = bool(shape_ok and dtype_ok and fbr_close and mask_close)
+        ok_all = ok_all and ok
+        print(f"computeFbr self-check (a={a}): {'PASS' if ok else 'FAIL'} "
+              f"(shape={shape_ok}, dtype={dtype_ok}, fbr_close={fbr_close}, "
+              f"mask_close={mask_close}, max_fbr_diff={max_fbr_diff:.3e})")
+        if not ok:
+            print(f"  ref fbr {np.asarray(fbr_ref)} got fbr {np.asarray(fbr_g)}")
+    return ok_all
 
 
 if __name__ == "__main__":
