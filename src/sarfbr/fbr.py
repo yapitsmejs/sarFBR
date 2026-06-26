@@ -80,6 +80,7 @@ def theoreticalCv(enl: float) -> float:
         math.gamma(enl)
         * math.gamma(enl + 1)
         / (math.gamma(enl + 0.5)**2)
+        - 1
     )
 
     return theoreticalCv
