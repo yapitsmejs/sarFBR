@@ -18,12 +18,16 @@ the worst date:
 1. Compute the temporal coefficient of variation ``CV = std / mean`` over the
    *D* dates. The statistic is NaN-aware, so dates rejected in earlier
    iterations drop out of the mean/std of later ones.
-2. While any pixel's CV exceeds the speckle threshold ``CV_speckle =
-   theoreticalCv(enl)``, flag as invalid the single date whose value shows the
-   largest absolute deviation from that pixel's temporal mean (the likely
-   ephemeral target), set the matching entry of the validity mask to ``NaN``,
-   and recompute the CV. Dates are removed one at a time until every surviving
-   pixel's CV is at or below the speckle level.
+2. While any pixel's CV exceeds the acceptance threshold
+   ``Psi(k) = CV_speckle + a / sqrt(k)`` — with ``CV_speckle =
+   theoreticalCv(enl)`` and ``k`` the per-pixel count of surviving dates — flag
+   as invalid the single date whose value shows the largest absolute deviation
+   from that pixel's temporal mean (the likely ephemeral target), set the
+   matching entry of the validity mask to ``NaN``, and recompute the CV. The
+   ``a / sqrt(k)`` margin (the paper's false-alarm term, ``a = alpha``) cushions
+   the threshold as dates are rejected; with ``a = 0`` it reduces to the plain
+   speckle level. Dates are removed one at a time until every surviving pixel's
+   CV is at or below the threshold.
 3. Combine the surviving dates into a single FBR value. In MP mode this is the
    multi-look average of the surviving stable dates: the intensity
    (amplitude**2) is averaged over the survivors and square-rooted back to
@@ -51,13 +55,6 @@ except ImportError:
 __all__ = ["computeFbr", "theoreticalCv"]
 
 _EPS = 1e-12
-
-# False-alarm margin for the paper's acceptance threshold
-# ``Psi(k) = CV_speckle + alpha / sqrt(k)``. The current iterative implementation
-# rejects dates against a plain ``CV_speckle`` threshold (no margin), so
-# ``_ALPHA`` is currently unused; it is kept as a module constant so a
-# margin-based threshold can be reintroduced without widening the public API.
-_ALPHA = 3.0
 
 
 def theoreticalCv(enl: float) -> float:
@@ -135,7 +132,7 @@ def _computeFbr_cupy(stack, mode: str, enl: float):
     return fbr, validMask
 
 
-def computeFbr(stack, mode: str = "mp", enl: float = 1.0):
+def computeFbr(stack, mode: str = "mp", enl: float = 1.0, a: float = 0.0):
     """Compute the Frozen Background Reference image from a SAR time-series stack.
 
     Parameters
@@ -151,6 +148,13 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0):
     enl : float, default 1.0
         Equivalent number of looks *L*, used to derive the theoretical speckle CV
         via :func:`theoreticalCv`.
+    a : float, default 0.0
+        False-alarm margin coefficient ``alpha`` in the paper's acceptance
+        threshold ``Psi(k) = CV_speckle + a / sqrt(k)``, with ``k`` the per-pixel
+        count of surviving dates. ``a = 0`` (the default) recovers the plain
+        ``CV_speckle`` threshold; a larger ``a`` cushions the threshold as dates
+        are rejected (the margin grows when few dates remain), reducing
+        over-rejection.
 
     Returns
     -------
@@ -188,21 +192,23 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0):
 
     D, H, W = x.shape
     cvSpeckle = float(theoreticalCv(enl))
+    fbrThreshold = cvSpeckle + a/np.sqrt(np.sum(~np.isnan(x),axis = 0))
     # Iteratively reject the worst date per pixel until every pixel's temporal CV
     # is at or below the speckle level. `cvX` is the per-pixel CV over dates
     # (shape (H, W)); `validMask` carries NaN where a date has been rejected.
     validMask = np.ones_like(x)
     cvX = np.nanstd(x, axis=0) / np.nanmean(x, axis=0)
     fbrIteration = 0
-    while np.any(cvX > cvSpeckle) and fbrIteration < D - 2:
+    while np.any(cvX > fbrThreshold) and fbrIteration < D - 2:
         # For pixels still above the threshold, reject the single date whose
         # value departs most from that pixel's temporal mean (the putative
         # ephemeral target): set its validity entry to NaN.
         xMeanDeviation = np.abs(x - np.nanmean(x,axis = 0)[np.newaxis,...])
         xMaxMeanDeviation = np.nanmax(xMeanDeviation,axis = 0)
-        validMask = np.where((cvX > cvSpeckle)[np.newaxis,...] & (xMeanDeviation == xMaxMeanDeviation[np.newaxis,...]), np.nan, validMask)
+        validMask = np.where((cvX > fbrThreshold)[np.newaxis,...] & (xMeanDeviation == xMaxMeanDeviation[np.newaxis,...]), np.nan, validMask)
         x *= validMask
         cvX = np.nanstd(x, axis=0) / np.nanmean(x, axis=0)
+        fbrThreshold = cvSpeckle + a/np.sqrt(np.sum(~np.isnan(x),axis = 0))
         fbrIteration += 1
 
     if mode == "mp":
