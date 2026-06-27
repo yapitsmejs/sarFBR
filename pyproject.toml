@@ -35,10 +35,12 @@ classifiers = [
 dependencies = ["numpy>=1.21"]
 
 [project.optional-dependencies]
-# Optional GPU acceleration. Install the CuPy wheel matching your CUDA toolkit,
-# e.g. `pip install cupy-cuda12x` (or cupy-cuda11x). Listed here so that
-# `pip install "sarfbr[gpu]"` attempts to pull a working CuPy build.
-gpu = ["cupy"]
+# Optional GPU acceleration. cupy is NOT pulled automatically -- it is a
+# machine-specific dependency (the wheel depends on your CUDA version/toolkit).
+# Install the matching wheel manually, e.g. `pip install cupy-cuda13x` (or
+# cupy-cuda12x / cupy-cuda11x), or run `scripts/install_cupy.py` to auto-detect
+# and install the right wheel into this project's venv. The base package falls
+# back to NumPy when cupy is absent.
 dev = ["pytest>=7"]
 
 [project.urls]
