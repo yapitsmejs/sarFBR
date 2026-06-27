@@ -54,9 +54,6 @@ except ImportError:
 
 __all__ = ["computeFbr", "theoreticalCv"]
 
-_EPS = 1e-12
-
-
 def theoreticalCv(enl: float) -> float:
     """Theoretical speckle coefficient of variation for amplitude SAR data.
 
@@ -146,11 +143,11 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0, a: float = 0.0):
     stack : array, shape (D, H, W)
         Time-series of SAR **amplitude** images; axis 0 is time (D dates).
     mode : {"mp", "rp"}, default "mp"
-        ``"mp"`` averages the surviving stable dates per pixel (variance reduced
-        by roughly sqrt(k)). ``"rp"`` would draw a single random stable date per
-        pixel to preserve the original speckle statistics, but it is not
-        implemented: an ``"rp"`` request currently falls back to ``"mp"`` with a
-        warning.
+        ``"mp"`` averages the intensity of surviving stable dates per pixel 
+        (variance reduced by roughly sqrt(k)). ``"rp"`` would draw a single 
+        random stable date per pixel to preserve the original speckle statistics, 
+        but it is not implemented: an ``"rp"`` request currently falls back to 
+        ``"mp"`` with a warning.
     enl : float, default 1.0
         Equivalent number of looks *L*, used to derive the theoretical speckle CV
         via :func:`theoreticalCv`.
