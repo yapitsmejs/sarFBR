@@ -2,92 +2,152 @@
 
 A Python implementation of the **Frozen Background Reference (FBR)** method for
 detecting ephemeral objects in SAR (Synthetic Aperture Radar) time-series, based on
+Taillade, Thirion-Lefevre & Guinvarc'h, *Remote Sensing* 2020, 12(11), 1720
+(<https://doi.org/10.3390/rs12111720>). It builds a target-free reference image of a
+scene's stable background by iteratively rejecting dates whose temporal coefficient
+of variation exceeds the theoretical speckle CV, then multi-looks the survivors.
+`numpy` is required; `cupy` is an **optional** GPU fast-path with a NumPy fallback
+when it (or a CUDA device) is absent.
 
-> Taillade, T.; Thirion-Lefevre, L.; Guinvarc'h, R.
-> *Detecting Ephemeral Objects in SAR Time-Series Using Frozen Background-Based
-> Change Detection.* **Remote Sensing**, 2020, 12(11), 1720.
-> https://doi.org/10.3390/rs12111720
+This package implements only the FBR image-computation step (iterative CV-based
+stable-pixel selection + MP/RP combination). The downstream likelihood-ratio
+change-detection test from the paper is out of scope. Inputs are assumed to be SAR
+**amplitude** images.
 
-The FBR method builds a target-free reference image of a scene's stable background
-from a stack of SAR acquisitions. Each pixel's temporal coefficient of variation (CV)
-is compared against the theoretical speckle CV for amplitude imagery
-(Rayleigh–Nakagami, parameterised by the equivalent number of looks). Dates whose CV
-exceeds the threshold Ψ = CV_speckle + α/√D are rejected as temporally unstable
-(i.e. occupied by an ephemeral target such as a car or ship). The surviving "stable
-candidate" dates are then combined into a single FBR image in one of two modes:
+## Install — pull from GitHub into an external repo
 
-- **RP (Random Pixel)** — pick a single random stable date per pixel; preserves the
-  original speckle statistics.
-- **MP (Multi-Temporal Pixels)** — coherently average all stable dates per pixel;
-  reduces variance by √D, improving low-SNR target detection.
+The package is **not on PyPI**; install it directly from GitHub. `numpy` is pulled
+automatically as a required dependency. `cupy` is intentionally **not** installed
+here — it is a machine-specific CUDA wheel (see
+[Set up cupy](#set-up-cupy-optional-gpu-fast-path) below).
 
-This package implements only the **FBR image computation** step (RP + MP, iterative
-CV-based stable-pixel selection). The downstream likelihood-ratio change-detection
-test from the paper is out of scope. Inputs are assumed to be SAR **amplitude**
-images. The core runs on NumPy; optional CuPy GPU acceleration is planned.
+### uv (this project's own toolchain)
 
-## Installation
-
-Install directly from git (the intended distribution channel):
+New project:
 
 ```bash
-pip install git+https://github.com/yapitsmejs/sarFBR.git
+uv init myrepo && cd myrepo
+uv add "git+https://github.com/yapitsmejs/sarFBR.git"
 ```
 
-## Quick start
+Pin to a specific commit (or a tag, once one is cut — same `@<ref>` syntax):
+
+```bash
+uv add "git+https://github.com/yapitsmejs/sarFBR.git@<commit-sha>"
+```
+
+### pip (any virtualenv)
+
+```bash
+python -m venv .venv
+# Windows:  .venv\Scripts\activate      | macOS/Linux:  source .venv/bin/activate
+python -m pip install "git+https://github.com/yapitsmejs/sarFBR.git"
+```
+
+Pin to a commit/tag:
+
+```bash
+python -m pip install "git+https://github.com/yapitsmejs/sarFBR.git@<commit-sha>"
+```
+
+## Set up cupy (optional GPU fast-path)
+
+A usable GPU is **not** required — `sarfbr` runs on the NumPy fallback when `cupy`
+is absent or no CUDA device is detected. Install cupy only if you want the GPU
+path, and install it into the **same venv** that holds `sarfbr`.
+
+### Option A — manual (recommended, self-contained)
+
+1. Detect your CUDA major version:
+
+   ```bash
+   nvcc --version        # CUDA Toolkit present -> "release X.Y" gives the major
+   nvidia-smi           # no toolkit -> read the "CUDA Version:" the driver supports
+   ```
+
+2. Install the matching wheel. Pick `cupy-cuda11x`, `cupy-cuda12x`, or
+   `cupy-cuda13x` by your CUDA major (11, 12, or 13). If you have a GPU but **no**
+   CUDA Toolkit, add the `[ctk]` extra so the wheel bundles CUDA libraries via PyPI.
+
+   uv:
+
+   ```bash
+   uv pip install cupy-cuda13x                       # toolkit present -> system CUDA
+   uv pip install "cupy-cuda12x[ctk]"                # GPU, no toolkit -> bundled CUDA
+   ```
+
+   pip:
+
+   ```bash
+   python -m pip install cupy-cuda13x
+   python -m pip install "cupy-cuda12x[ctk]"
+   ```
+
+   Only **one** `cupy-cuda*x` distribution may be installed at a time — if you are
+   upgrading or switching CUDA versions, uninstall the others first:
+
+   ```bash
+   uv pip uninstall cupy cupy-cuda11x cupy-cuda12x cupy-cuda13x
+   # or:  python -m pip uninstall -y cupy cupy-cuda11x cupy-cuda12x cupy-cuda13x
+   ```
+
+3. Verify a device is visible:
+
+   ```bash
+   python -c "import cupy; print(cupy.__version__, cupy.cuda.runtime.getDeviceCount())"
+   ```
+
+### Option B — reuse this repo's auto-detecting installer (convenience)
+
+This repo ships `scripts/install_cupy.py`, which auto-detects the GPU + CUDA Toolkit
+and installs the right wheel (no GPU → installs nothing; GPU + toolkit →
+`cupy-cuda{MAJOR}x`; GPU, no toolkit → `cupy-cuda{MAJOR}x[ctk]`). It installs into its
+**own** repo's `.venv`, so to use it for your external repo, fetch just the script and
+run it from your repo root (it auto-detects `REPO_ROOT/.venv`):
+
+```bash
+# macOS/Linux
+curl -fsSLO https://raw.githubusercontent.com/yapitsmejs/sarFBR/main/scripts/install_cupy.py
+python install_cupy.py
+
+# Windows PowerShell
+Invoke-WebRequest -UseBasicParsing -OutFile install_cupy.py `
+  https://raw.githubusercontent.com/yapitsmejs/sarFBR/main/scripts/install_cupy.py
+python install_cupy.py
+```
+
+(Alternatively, `git clone` this repo and run `uv run python scripts/install_cupy.py`
+inside it, then point that venv at your project.)
+
+## Usage
+
+`computeFbr` dispatches on the **input array type**, not a flag: a `cupy.ndarray`
+runs on the GPU and returns CuPy arrays; anything else uses the NumPy path. Move the
+stack to the GPU once and bring the results back with `cupy.asnumpy`.
 
 ```python
 import numpy as np
 import sarfbr
 
-# stack: time-series of SAR amplitude images, shape (D, H, W), D = number of dates.
+# stack: time-series of SAR amplitude images, shape (D, H, W); axis 0 is time.
 stack = np.load("stack.npy")                       # (D, H, W)
-fbr, mask = sarfbr.computeFbr(
-    stack,
-    mode="mp",                                     # "mp" (average) or "rp" (random pick)
-    enl=16,                                         # equivalent number of looks L
-)
-# fbr : (H, W) frozen background reference image
-# mask: (D, H, W) bool — True where the stack entry was used (temporally stable)
+
+# NumPy path (default; works with or without cupy installed)
+fbr, mask = sarfbr.computeFbr(stack, mode="mp", enl=16)
+
+# GPU path: move the stack up once, run on the GPU, bring the results back once
+import cupy as cp
+g = cp.asarray(stack)
+fbr_g, mask_g = sarfbr.computeFbr(g, mode="mp", enl=16)
+fbr, mask = cp.asnumpy(fbr_g), cp.asnumpy(mask_g)
 ```
 
-## API
+### API
 
-### `sarfbr.computeFbr(stack, mode="mp", enl=1.0)`
-
-Compute the Frozen Background Reference image from a SAR time-series stack.
-
-| Parameter | Description |
-|-----------|-------------|
-| `stack` | 3-D array `(D, H, W)`; axis 0 is time (D dates). Assumed to be **amplitude**. |
-| `mode` | `"mp"` (average the stable dates — variance reduced by √k) or `"rp"` (draw one random stable date per pixel, preserving speckle statistics). |
-| `enl` | Equivalent number of looks *L*, used to derive the theoretical speckle CV via `theoreticalCv`. |
-
-Returns a tuple `(fbr, mask)`:
-
-| Return | Description |
-|--------|-------------|
-| `fbr` | `(H, W)` frozen background reference image. |
-| `mask` | `(D, H, W)` boolean valid mask: `mask[d, h, w]` is `True` when the stack entry at date `d`, pixel `(h, w)` was judged temporally stable and contributed to the FBR image. |
-
-The acceptance threshold is `Ψ(k) = CV_speckle + α/√k`, where `CV_speckle =
-theoreticalCv(enl)` and α is a fixed internal false-alarm margin (~3-sigma). For each
-pixel the largest prefix of the temporally-sorted dates whose CV falls below Ψ is
-accepted as the stable set; everything above it is treated as a target date.
-
-### `sarfbr.theoreticalCv(enl)`
-
-Theoretical speckle coefficient of variation for amplitude SAR data with *L* = `enl`
-equivalent looks. Follows the Nakagami distribution with shape *m = L*:
-
-    CV(L) = sqrt(L · Γ(L)² / Γ(L + 1/2)² − 1)
-
-which reduces to `sqrt(4/π − 1)` (the Rayleigh case) for `L = 1`.
-
-## References
-
-- Primary paper: <https://doi.org/10.3390/rs12111720>
-- SONDRA group write-up: <https://sondra.fr/detecting-ephemeral-objects-in-sar-time-series-using-frozen-background-based-change-detection/>
+| Function | Description |
+| --- | --- |
+| `computeFbr(stack, mode="mp", enl=1.0, a=0.0)` | Compute the FBR image from a `(D, H, W)` amplitude stack. `mode` is `"mp"` (multi-look the surviving stable dates — intensity averaged then rooted back to amplitude, variance reduced by ~√k) or `"rp"` (not implemented; falls back to `"mp"` with a warning). `enl` is the equivalent number of looks *L*; `a` is the false-alarm margin in the acceptance threshold `Ψ(k) = CV_speckle + a/√k`. Returns `(fbr, mask)`, where `mask` is a `(D, H, W)` float array — `1.0` where the date was stable, `NaN` where rejected. |
+| `theoreticalCv(enl)` | Theoretical speckle CV for amplitude SAR with *L* = `enl` looks (Nakagami, `sqrt(L·Γ(L)²/Γ(L+1/2)² − 1)`); reduces to the Rayleigh `sqrt(4/π − 1)` at `L = 1`. |
 
 ## License
 
