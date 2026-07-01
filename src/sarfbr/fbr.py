@@ -28,12 +28,12 @@ the worst date:
    the threshold as dates are rejected; with ``a = 0`` it reduces to the plain
    speckle level. Dates are removed one at a time until every surviving pixel's
    CV is at or below the threshold.
-3. Combine the surviving dates into a single FBR value. In MP mode this is the
-   multi-look average of the surviving stable dates: the intensity
+3. Combine the surviving dates into a per-pixel FBR image. In MP mode this is
+   the multi-look average of each pixel's surviving stable dates: the intensity
    (amplitude**2) is averaged over the survivors and square-rooted back to
-   amplitude, i.e. ``fbr = sqrt(nanmean(x**2))`` — incoherent averaging of
-   intensities, not amplitudes. RP mode (random pick) is not implemented and
-   currently falls back to MP with a warning.
+   amplitude, i.e. ``fbr = sqrt(nanmean(x**2, axis=0))`` — incoherent averaging
+   of intensities, not amplitudes, yielding an ``(H, W)`` image. RP mode (random
+   pick) is not implemented and currently falls back to MP with a warning.
 """
 
 from __future__ import annotations
@@ -131,9 +131,10 @@ def _computeFbr_cupy(stack, mode: str, enl: float, a: float):
         fbrIteration += 1
 
     if mode == "mp":
-        # MP: multi-look the surviving stable dates — average the intensity
-        # (amplitude**2) over survivors and root back to amplitude.
-        fbr = cp.sqrt(cp.nanmean(x**2))
+        # MP: multi-look the surviving stable dates per pixel — average the
+        # intensity (amplitude**2) over survivors along the time axis and root
+        # back to amplitude, yielding an (H, W) image.
+        fbr = cp.sqrt(cp.nanmean(x**2, axis=0))
 
     return fbr, validMask
 
@@ -221,9 +222,10 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0, a: float = 0.0):
         fbrIteration += 1
 
     if mode == "mp":
-        # MP: multi-look the surviving stable dates — average the intensity
-        # (amplitude**2) over survivors and root back to amplitude.
-        fbr = np.sqrt(np.nanmean(x**2))
+        # MP: multi-look the surviving stable dates per pixel — average the
+        # intensity (amplitude**2) over survivors along the time axis and root
+        # back to amplitude, yielding an (H, W) image.
+        fbr = np.sqrt(np.nanmean(x**2, axis=0))
 
     return fbr, validMask
 

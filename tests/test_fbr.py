@@ -58,11 +58,11 @@ def _synthetic_stack(D=10, target_value=20.0):
 def test_mp_recovers_background_everywhere():
     stack, D = _synthetic_stack()
     fbr, mask = computeFbr(stack, mode="mp", enl=1.0)
-    # The current implementation collapses the surviving stack to a single
-    # scalar FBR value (sqrt(nanmean(x**2)) over the whole masked stack — the
-    # multi-look intensity average rooted back to amplitude). For a constant
-    # background of amplitude 1.0 this is exactly 1.0.
-    assert np.ndim(fbr) == 0
+    # MP returns a per-pixel (H, W) image: each pixel is the multi-look
+    # intensity average of its own surviving stable dates, rooted back to
+    # amplitude (sqrt(nanmean(x**2, axis=0))). For a constant background of
+    # amplitude 1.0 every pixel is exactly 1.0.
+    assert fbr.shape == (2, 2)
     np.testing.assert_allclose(fbr, 1.0, atol=1e-12)
 
 
