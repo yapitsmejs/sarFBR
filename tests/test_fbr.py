@@ -132,3 +132,28 @@ def test_int_input_is_coerced():
     stack, _ = _synthetic_stack()
     fbr, mask = computeFbr(stack.astype(np.int32), mode="mp", enl=1.0)
     np.testing.assert_allclose(fbr, 1.0, atol=1e-9)
+
+
+def test_complex_input_uses_amplitude_not_real_part():
+    # Complex SLC data must be reduced to amplitude (|z| = sqrt(re^2 + im^2))
+    # before the float32 cast, NOT projected onto its real part (which is what a
+    # bare `.astype(np.float32)` does, dropping the imaginary component).
+    stack_real, _ = _synthetic_stack()
+    # Build a complex stack whose magnitude equals the real-amplitude stack but
+    # whose real part is *not* the amplitude: put energy in the imaginary part.
+    re = np.full_like(stack_real, 1.0)
+    im = np.sqrt(np.maximum(stack_real**2 - re**2, 0.0))
+    stack_complex = (re + 1j * im).astype(np.complex64)
+
+    # Sanity: the complex stack's magnitude recovers the real-amplitude stack.
+    np.testing.assert_allclose(np.abs(stack_complex), stack_real, atol=1e-6)
+
+    fbr_c, mask_c = computeFbr(stack_complex, mode="mp", enl=1.0)
+    fbr_r, mask_r = computeFbr(stack_real, mode="mp", enl=1.0)
+
+    # Amplitude preservation: the complex stack must give the same FBR value and
+    # the same rejection mask as the equivalent real-amplitude stack. If the cast
+    # had dropped the imaginary part, the target pixels (whose real part is 1.0
+    # for every date) would look like pure background and nothing would be rejected.
+    np.testing.assert_allclose(fbr_c, fbr_r, atol=1e-5)
+    assert np.array_equal(mask_c, mask_r, equal_nan=True)

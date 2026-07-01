@@ -93,7 +93,10 @@ def _computeFbr_cupy(stack, mode: str, enl: float, a: float):
     kernels dominate over the host/device round-trips. ``stack`` stays on the GPU
     for the whole run; the caller brings ``fbr``/``mask`` back with ``cp.asnumpy``.
     """
-    x = stack.astype(cp.float32)
+    # If `stack` carries complex SLC data, take the magnitude first so amplitude
+    # is preserved: a bare `.astype(cp.float32)` on a complex array would drop
+    # the imaginary part (ComplexWarning) and keep only the real component.
+    x = (cp.abs(stack) if cp.iscomplexobj(stack) else stack).astype(cp.float32)
     if x.ndim != 3:
         raise ValueError(f"stack must be 3-D (D, H, W); got shape {x.shape}")
     if x.size == 0:
@@ -187,7 +190,10 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0, a: float = 0.0):
         print("computeFbr: using cupy GPU acceleration")
         return _computeFbr_cupy(stack, mode, enl, a)
 
-    x = stack.astype(np.float32)
+    # If `stack` carries complex SLC data, take the magnitude first so amplitude
+    # is preserved: a bare `.astype(np.float32)` on a complex array would drop
+    # the imaginary part (ComplexWarning) and keep only the real component.
+    x = (np.abs(stack) if np.iscomplexobj(stack) else stack).astype(np.float32)
     if x.ndim != 3:
         raise ValueError(f"stack must be 3-D (D, H, W); got shape {x.shape}")
     if x.size == 0:
