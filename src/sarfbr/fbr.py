@@ -82,21 +82,26 @@ def theoreticalCv(enl: float) -> float:
 
     return theoreticalCv
 
-def _computeFbr_cupy(stack, mode: str, enl: float, a: float):
-    """cupy backend for computeFbr (`stack` is a cupy.ndarray; returns cupy).
+def _computeFbr_core(stack, mode, enl, a, xp):
+    """Single ``xp``-parameterized core for computeFbr (numpy or cupy).
 
-    Same iterative CV-based stable-pixel selection as the NumPy path, but the
-    per-iteration nanmean/nanstd/nanmax reductions and the rejection mask run on
-    the GPU. The loop guard still syncs to the host once per iteration
-    (``bool(cp.any(...))`` reads the any-reduction back to a Python bool), so this
-    is most worthwhile when D is large and H*W is large enough that the reduction
-    kernels dominate over the host/device round-trips. ``stack`` stays on the GPU
-    for the whole run; the caller brings ``fbr``/``mask`` back with ``cp.asnumpy``.
+    Runs the iterative CV-based stable-pixel selection on whichever array module
+    ``xp`` is (``np`` or ``cp``). The per-iteration nanmean/nanstd/nanmax
+    reductions and the rejection mask run through ``xp.*`` — one code path on
+    both backends, no mirrored cupy/NumPy functions. On the cupy path the loop
+    guard still syncs to the host once per iteration (``bool(xp.any(...))`` reads
+    the any-reduction back to a Python bool), so the GPU path is most worthwhile
+    when D is large and H*W is large enough that the reduction kernels dominate
+    over the host/device round-trips. The caller (``computeFbr``) handles
+    device placement: it calls this core with ``cp`` on the GPU branch (having
+    moved the stack up with ``cp.asarray``) and with ``np`` on the CPU branch.
     """
-    # If `stack` carries complex SLC data, take the magnitude first so amplitude
-    # is preserved: a bare `.astype(cp.float32)` on a complex array would drop
-    # the imaginary part (ComplexWarning) and keep only the real component.
-    x = (cp.abs(stack) if cp.iscomplexobj(stack) else stack).astype(cp.float32)
+    # Move to the target backend (no-op on NumPy; host->device on cupy) and, if
+    # `stack` carries complex SLC data, take the magnitude first so amplitude is
+    # preserved: a bare `.astype(xp.float32)` on a complex array would drop the
+    # imaginary part (ComplexWarning) and keep only the real component.
+    x = xp.asarray(stack)
+    x = (xp.abs(x) if xp.iscomplexobj(x) else x).astype(xp.float32)
     if x.ndim != 3:
         raise ValueError(f"stack must be 3-D (D, H, W); got shape {x.shape}")
     if x.size == 0:
@@ -108,33 +113,35 @@ def _computeFbr_cupy(stack, mode: str, enl: float, a: float):
     # the per-pixel count of surviving (non-rejected) dates. With a=0 this
     # reduces to the plain CV_speckle threshold. Recomputed each iteration as
     # dates are rejected (k shrinks -> margin grows).
-    fbrThreshold = cvSpeckle + a / cp.sqrt(cp.sum(~cp.isnan(x), axis=0))
+    fbrThreshold = cvSpeckle + a / xp.sqrt(xp.sum(~xp.isnan(x), axis=0))
     # Iteratively reject the worst date per pixel until every pixel's temporal CV
     # is at or below the threshold. `cvX` is the per-pixel CV over dates
     # (shape (H, W)); `validMask` carries NaN where a date has been rejected.
-    validMask = cp.ones_like(x)
-    cvX = cp.nanstd(x, axis=0) / cp.nanmean(x, axis=0)
+    validMask = xp.ones_like(x)
+    cvX = xp.nanstd(x, axis=0) / xp.nanmean(x, axis=0)
     fbrIteration = 0
-    while bool(cp.any(cvX > fbrThreshold)) and fbrIteration < D - 2:
+    while bool(xp.any(cvX > fbrThreshold)) and fbrIteration < D - 2:
         # For pixels still above the threshold, reject the single date whose
         # value departs most from that pixel's temporal mean (the putative
         # ephemeral target): set its validity entry to NaN.
-        xMeanDeviation = cp.abs(x - cp.nanmean(x, axis=0)[None, ...])
-        xMaxMeanDeviation = cp.nanmax(xMeanDeviation, axis=0)
+        xMeanDeviation = xp.abs(x - xp.nanmean(x, axis=0)[None, ...])
+        xMaxMeanDeviation = xp.nanmax(xMeanDeviation, axis=0)
         reject = (cvX > fbrThreshold)[None, ...] & (xMeanDeviation == xMaxMeanDeviation[None, ...])
         # Cast to float32 explicitly: cupy's scalar promotion for `cp.nan` is
-        # version-dependent, and the mask must stay float32 to match the NumPy path.
-        validMask = cp.where(reject, cp.nan, validMask).astype(cp.float32, copy=False)
+        # version-dependent, and the mask must stay float32. On the NumPy path
+        # this is a no-op — the float32 array already absorbs the python-float
+        # nan under NEP 50 weak promotion (so the mask never upcasts to float64).
+        validMask = xp.where(reject, xp.nan, validMask).astype(xp.float32, copy=False)
         x *= validMask
-        cvX = cp.nanstd(x, axis=0) / cp.nanmean(x, axis=0)
-        fbrThreshold = cvSpeckle + a / cp.sqrt(cp.sum(~cp.isnan(x), axis=0))
+        cvX = xp.nanstd(x, axis=0) / xp.nanmean(x, axis=0)
+        fbrThreshold = cvSpeckle + a / xp.sqrt(xp.sum(~xp.isnan(x), axis=0))
         fbrIteration += 1
 
     if mode == "mp":
         # MP: multi-look the surviving stable dates per pixel — average the
         # intensity (amplitude**2) over survivors along the time axis and root
         # back to amplitude, yielding an (H, W) image.
-        fbr = cp.sqrt(cp.nanmean(x**2, axis=0))
+        fbr = xp.sqrt(xp.nanmean(x**2, axis=0))
 
     return fbr, validMask
 
@@ -181,65 +188,41 @@ def computeFbr(stack, mode: str = "mp", enl: float = 1.0, a: float = 0.0):
         print("rp is not implemented, defaulting to mp")
         mode = "mp"
 
-    # Dispatch on the input array type: a cupy.ndarray is processed on the GPU
-    # (cupy reductions — nanmean/nanstd/nanmax) and returned as cupy arrays;
-    # anything else uses the NumPy path and returns NumPy arrays. A caller that
-    # wants GPU acceleration moves the stack to the GPU once with cupy.asarray
-    # and brings `fbr`/`mask` back with cupy.asnumpy. (GPU use is gated on a
-    # device actually being present; without one the cupy branch is never taken.)
-    if _HAVE_CUPY_GPU and isinstance(stack, cp.ndarray):
+    # Auto-accelerate when a CUDA device is present (the convention shared with
+    # the sister SAR repos): a cupy input stays on the GPU and returns cupy
+    # arrays (cupy in -> cupy out); a NumPy input is computed on the GPU and
+    # returned as NumPy (numpy in -> numpy out, auto round-tripped via
+    # cp.asnumpy). A caller that wants to keep the stack resident across calls
+    # passes a cupy array; one that wants plain NumPy semantics passes a NumPy
+    # array and the device transfer is handled here. Without a GPU the NumPy
+    # path is used regardless.
+    if _HAVE_CUPY_GPU:
         print("computeFbr: using cupy GPU acceleration")
-        return _computeFbr_cupy(stack, mode, enl, a)
+        fbr, mask = _computeFbr_core(stack, mode, enl, a, cp)
+        if isinstance(stack, cp.ndarray):
+            return fbr, mask                       # cupy in -> cupy out
+        return cp.asnumpy(fbr), cp.asnumpy(mask)   # numpy in -> numpy out
 
-    # If `stack` carries complex SLC data, take the magnitude first so amplitude
-    # is preserved: a bare `.astype(np.float32)` on a complex array would drop
-    # the imaginary part (ComplexWarning) and keep only the real component.
-    x = (np.abs(stack) if np.iscomplexobj(stack) else stack).astype(np.float32)
-    if x.ndim != 3:
-        raise ValueError(f"stack must be 3-D (D, H, W); got shape {x.shape}")
-    if x.size == 0:
-        raise ValueError("stack is empty")
-
-    D, H, W = x.shape
-    cvSpeckle = float(theoreticalCv(enl))
-    fbrThreshold = cvSpeckle + a/np.sqrt(np.sum(~np.isnan(x),axis = 0))
-    # Iteratively reject the worst date per pixel until every pixel's temporal CV
-    # is at or below the speckle level. `cvX` is the per-pixel CV over dates
-    # (shape (H, W)); `validMask` carries NaN where a date has been rejected.
-    validMask = np.ones_like(x)
-    cvX = np.nanstd(x, axis=0) / np.nanmean(x, axis=0)
-    fbrIteration = 0
-    while np.any(cvX > fbrThreshold) and fbrIteration < D - 2:
-        # For pixels still above the threshold, reject the single date whose
-        # value departs most from that pixel's temporal mean (the putative
-        # ephemeral target): set its validity entry to NaN.
-        xMeanDeviation = np.abs(x - np.nanmean(x,axis = 0)[np.newaxis,...])
-        xMaxMeanDeviation = np.nanmax(xMeanDeviation,axis = 0)
-        validMask = np.where((cvX > fbrThreshold)[np.newaxis,...] & (xMeanDeviation == xMaxMeanDeviation[np.newaxis,...]), np.nan, validMask)
-        x *= validMask
-        cvX = np.nanstd(x, axis=0) / np.nanmean(x, axis=0)
-        fbrThreshold = cvSpeckle + a/np.sqrt(np.sum(~np.isnan(x),axis = 0))
-        fbrIteration += 1
-
-    if mode == "mp":
-        # MP: multi-look the surviving stable dates per pixel — average the
-        # intensity (amplitude**2) over survivors along the time axis and root
-        # back to amplitude, yielding an (H, W) image.
-        fbr = np.sqrt(np.nanmean(x**2, axis=0))
-
-    return fbr, validMask
+    # --- CPU / NumPy fallback ---
+    return _computeFbr_core(stack, mode, enl, a, np)
 
 
-def _computeFbr_selfcheck():
+def _computeFbr_cupy_selfcheck():
     """Equivalence check: cupy computeFbr vs the NumPy reference.
 
-    Both paths run the rejection loop in float32, so the reductions agree to
-    ~1e-5 relative but not bit-for-bit; we check allclose, not array_equal. The
-    input is built so clean pixels are constant in time (CV = 0, never rejected)
-    and only the planted target dates are rejected — the argmax selection is
-    unambiguous, so the two paths reject the same dates and the masks match
-    exactly (allclose with equal_nan). Skipped (and reported as such) when no
-    GPU is available.
+    The NumPy reference is produced by calling the ``xp``-parameterized
+    ``_computeFbr_core`` with ``np`` directly (bypassing ``computeFbr``'s
+    auto-dispatch, which uses the GPU whenever one is present). The GPU result
+    comes from the public ``computeFbr`` with a cupy input (cupy in -> cupy out),
+    brought back with ``cp.asnumpy``. The numpy-in -> numpy-out contract is also
+    exercised: ``computeFbr(stack, ...)`` with a NumPy input must return NumPy
+    arrays (auto round-tripped through the GPU). Both paths run the rejection
+    loop in float32, so the reductions agree to ~1e-5 relative but not
+    bit-for-bit; we check allclose, not array_equal. The input is built so clean
+    pixels are constant in time (CV = 0, never rejected) and only the planted
+    target dates are rejected — the argmax selection is unambiguous, so the two
+    paths reject the same dates and the masks match exactly (allclose with
+    equal_nan). Skipped (and reported as such) when no GPU is available.
     """
     if not _HAVE_CUPY_GPU:
         print("computeFbr self-check: skipped (no GPU available — NumPy path only).")
@@ -261,12 +244,16 @@ def _computeFbr_selfcheck():
     g = cp.asarray(stack)
     ok_all = True
     for a in (0.0, 3.0):
-        # Reference: NumPy path.
-        fbr_ref, mask_ref = computeFbr(stack, mode="mp", enl=1.0, a=a)
-        # GPU: move up once, run on GPU, bring back once.
+        # NumPy reference: the core directly with np (bypasses auto-dispatch,
+        # which would otherwise compute on the GPU when one is present).
+        fbr_ref, mask_ref = _computeFbr_core(stack, "mp", 1.0, a, np)
+        # GPU via the public function: cupy in -> cupy out, then bring back once.
         fbr_g, mask_g = computeFbr(g, mode="mp", enl=1.0, a=a)
         fbr_g = cp.asnumpy(fbr_g)
         mask_g = cp.asnumpy(mask_g)
+        # numpy in -> numpy out contract: a NumPy input must return NumPy arrays.
+        fbr_nio, mask_nio = computeFbr(stack, mode="mp", enl=1.0, a=a)
+        nio_ok = isinstance(fbr_nio, np.ndarray) and isinstance(mask_nio, np.ndarray)
 
         shape_ok = mask_g.shape == mask_ref.shape == (D, H, W)
         dtype_ok = mask_g.dtype == mask_ref.dtype == np.float32
@@ -274,15 +261,15 @@ def _computeFbr_selfcheck():
         mask_close = np.allclose(mask_g, mask_ref, rtol=0.0, atol=0.0, equal_nan=True)
         max_fbr_diff = float(np.nanmax(np.abs(np.asarray(fbr_g) - np.asarray(fbr_ref))))
 
-        ok = bool(shape_ok and dtype_ok and fbr_close and mask_close)
+        ok = bool(shape_ok and dtype_ok and fbr_close and mask_close and nio_ok)
         ok_all = ok_all and ok
         print(f"computeFbr self-check (a={a}): {'PASS' if ok else 'FAIL'} "
               f"(shape={shape_ok}, dtype={dtype_ok}, fbr_close={fbr_close}, "
-              f"mask_close={mask_close}, max_fbr_diff={max_fbr_diff:.3e})")
+              f"mask_close={mask_close}, nio={nio_ok}, max_fbr_diff={max_fbr_diff:.3e})")
         if not ok:
             print(f"  ref fbr {np.asarray(fbr_ref)} got fbr {np.asarray(fbr_g)}")
     return ok_all
 
 
 if __name__ == "__main__":
-    _computeFbr_selfcheck()
+    _computeFbr_cupy_selfcheck()
