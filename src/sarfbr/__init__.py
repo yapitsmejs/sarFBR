@@ -12,6 +12,6 @@ from __future__ import annotations
 
 from .fbr import computeFbr, theoreticalCv
 
-__version__ = "0.1.0"
+__version__ = "0.1.3"
 
 __all__ = ["computeFbr", "theoreticalCv", "__version__"]

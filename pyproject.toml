@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sarfbr"
-version = "0.1.2"
+version = "0.1.3"
 description = "SAR Frozen Background Reference (FBR) method for ephemeral-object change detection in SAR time-series"
 readme = "README.md"
 requires-python = ">=3.9"
