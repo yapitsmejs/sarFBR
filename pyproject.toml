@@ -1,55 +1,88 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CuPy is NOT a declared dependency. It is installed on demand by
+# scripts/install_cupy.py, which detects the host NVIDIA GPU + CUDA Toolkit and
+# picks the matching wheel at runtime. `uv sync` therefore never installs cupy.
+#
+# Selection logic (mirrors scripts/install_cupy.py):
+#   No NVIDIA GPU        -> install nothing. The base package runs on the NumPy
+#                          fallback (numpy only).
+#   GPU + CUDA Toolkit   -> cupy-cuda{MAJOR}x        (uses the system CUDA
+#                          Toolkit, no bundled libs). {MAJOR} from `nvcc --version`.
+#   GPU, no CUDA Toolkit -> cupy-cuda{MAJOR}x[ctk]   (bundles CUDA libs via PyPI).
+#                          {MAJOR} inferred from `nvidia-smi`'s max supported CUDA
+#                          version; defaults to 12 when undetectable.
+#
+# Supported CUDA majors: 11 -> cupy-cuda11x, 12 -> cupy-cuda12x, 13 -> cupy-cuda13x.
+# Only one cupy dist may be installed at a time; the script scrubs all of
+# [cupy, cupy-cuda11x, cupy-cuda12x, cupy-cuda13x] before installing the chosen one.
+#
+# Install with:  uv run python scripts/install_cupy.py
+# ─────────────────────────────────────────────────────────────────────────────
 
 [project]
-name = "sarfbr"
-version = "0.1.3"
+name = "sar-fbr"
+version = "0.2.0"
 description = "SAR Frozen Background Reference (FBR) method for ephemeral-object change detection in SAR time-series"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Yap Joon Siong" }]
-keywords = [
-    "SAR",
-    "synthetic aperture radar",
-    "remote sensing",
-    "change detection",
-    "FBR",
-    "frozen background reference",
-    "ephemeral objects",
-    "speckle",
-]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Atmospheric Science",
-    "Topic :: Scientific/Engineering :: Image Processing",
-]
-dependencies = ["numpy>=1.21"]
+dependencies = ["numpy"]
 
 [project.optional-dependencies]
-# Optional GPU acceleration. cupy is NOT pulled automatically -- it is a
-# machine-specific dependency (the wheel depends on your CUDA version/toolkit).
-# Install the matching wheel manually, e.g. `pip install cupy-cuda13x` (or
-# cupy-cuda12x / cupy-cuda11x), or run `scripts/install_cupy.py` to auto-detect
-# and install the right wheel into this project's venv. The base package falls
-# back to NumPy when cupy is absent.
-dev = ["pytest>=7"]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "mypy>=1.11",
+    "ruff>=0.6",
+]
 
-[project.urls]
-Repository = "https://github.com/yapitsmejs/sarFBR"
-Documentation = "https://github.com/yapitsmejs/sarFBR#readme"
-Issues = "https://github.com/yapitsmejs/sarFBR/issues"
+[tool.hatch.build.targets.wheel]
+packages = ["src/sarFbr"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# N (pep8-naming) is deliberately excluded so camelCase functions/variables
+# are not flagged -- see CONVENTIONS.md "Naming conventions".
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]  # line length handled by the formatter
+
+[tool.ruff.format]
+# Match .editorconfig / .gitattributes so the formatter and editors agree on
+# line endings across platforms.
+line-ending = "lf"
+
+[tool.mypy]
+# Enforces the "type hints required on public functions" rule from
+# CONVENTIONS.md. Scoped to the shipped package; tests are not type-checked.
+files = ["src/sarFbr"]
+python_version = "3.12"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_optional = true
+show_error_codes = true
+
+# CuPy ships without type stubs; silence missing-import errors for it (the
+# array-module dispatch params are typed `Any` -- see CONVENTIONS.md "GPU
+# coverage rule"). NumPy is fully stubbed and stays strictly checked.
+[[tool.mypy.overrides]]
+module = ["scipy.signal", "scipy.*", "cupy", "cupyx.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Strict, cheap, always on. Coverage is NOT measured here so the dev loop
+# (`uv run pytest`) stays fast and does not fail during red-phase work; the
+# coverage threshold is enforced by `scripts/check.py` instead.
+addopts = ["--strict-markers", "--strict-config", "-ra"]
